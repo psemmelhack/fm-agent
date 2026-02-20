@@ -1,83 +1,35 @@
 """
 tools/memory.py
-Reads and writes user memory entries.
-Keeps a running log of Peter's preferences and past activity.
+Reads and writes user memory entries using the database layer.
 """
 
-import os
-import json
-from datetime import datetime
-from db.database import get_connection
+from db.database import write_memory_to_db, read_memories
 
 
 def write_memory(event_type: str, summary: str, metadata: dict = None):
-    """
-    Write a memory entry to the database.
-    
-    event_type: 'preference', 'attended', 'skipped', 'feedback'
-    summary:    plain English description of what happened
-    metadata:   optional dict with extra details (event name, location, etc.)
-    """
-    conn = get_connection()
-    conn.execute("""
-        INSERT INTO memories (event_type, summary, metadata, created_at)
-        VALUES (?, ?, ?, ?)
-    """, (
-        event_type,
-        summary,
-        json.dumps(metadata or {}),
-        datetime.now().isoformat()
-    ))
-    conn.commit()
-    conn.close()
+    """Write a memory entry."""
+    write_memory_to_db(event_type, summary, metadata)
 
 
 def read_recent_memories(limit: int = 10) -> str:
-    """
-    Read the most recent memory entries as a formatted string
-    suitable for injecting into an agent's context.
-    """
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT event_type, summary, created_at 
-        FROM memories 
-        ORDER BY created_at DESC 
-        LIMIT ?
-    """, (limit,)).fetchall()
-    conn.close()
-
+    """Read recent memories as a formatted string for agent context."""
+    rows = read_memories(limit=limit)
     if not rows:
         return "No previous interactions on record."
-
     entries = []
     for row in rows:
-        date = row["created_at"][:10]  # just the date part
+        date = row["created_at"][:10]
         entries.append(f"[{date}] {row['event_type'].upper()}: {row['summary']}")
-
     return "\n".join(entries)
 
 
 def read_preferences() -> str:
-    """
-    Read only 'preference' and 'feedback' memories —
-    the ones that reflect what Peter actually likes.
-    """
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT summary, created_at 
-        FROM memories 
-        WHERE event_type IN ('preference', 'feedback', 'attended')
-        ORDER BY created_at DESC 
-        LIMIT 20
-    """).fetchall()
-    conn.close()
-
+    """Read preference and activity memories."""
+    rows = read_memories(limit=20, types=["preference", "feedback", "attended"])
     if not rows:
         return "No preferences recorded yet."
-
     entries = []
     for row in rows:
         date = row["created_at"][:10]
         entries.append(f"[{date}] {row['summary']}")
-
     return "\n".join(entries)

@@ -10,3 +10,4 @@ tavily-python
 python-dotenv
 requests
 pytz
+psycopg2-binary
