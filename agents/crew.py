@@ -21,11 +21,17 @@ load_dotenv()
 
 from langchain_anthropic import ChatAnthropic
 
-llm = ChatAnthropic(
-    model="claude-sonnet-4-5",
-    anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
-    temperature=0.3
-)
+_llm = None
+
+def get_llm():
+    global _llm
+    if _llm is None:
+        _llm = ChatAnthropic(
+            model="claude-sonnet-4-5",
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+            temperature=0.3
+        )
+    return _llm
 
 location = os.getenv("MY_LOCATION", "Shelter Island, NY")
 
@@ -92,7 +98,7 @@ morning_agent = Agent(
         "But you never make it feel like you're reading from a file."
     ),
     tools=[send_telegram_tool],
-    llm=llm,
+    llm=get_llm(),
     verbose=True
 )
 
@@ -113,7 +119,7 @@ events_agent = Agent(
         "he skips so you can do better next time."
     ),
     tools=[search_events_tool, send_telegram_tool, save_event_tool, write_memory_tool],
-    llm=llm,
+    llm=get_llm(),
     verbose=True
 )
 
