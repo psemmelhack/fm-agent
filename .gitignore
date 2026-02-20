@@ -1,0 +1,12 @@
+# Environment
+.env
+venv/
+
+# Database
+db/fm_agent.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
