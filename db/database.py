@@ -654,3 +654,286 @@ def get_fairness_summary(estate_id: int) -> list:
         cols = [desc[0] for desc in c.description]
         return [dict(zip(cols, r)) for r in rows]
     return [dict(r) for r in rows]
+
+
+# ── Audit Log & Intent Notes ──────────────────────────────────────────────────
+
+def init_audit_tables():
+    """Add audit_log and intent_notes tables."""
+    conn = get_connection()
+    c = conn.cursor()
+
+    if USE_POSTGRES:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id SERIAL PRIMARY KEY,
+                estate_id INTEGER,
+                item_id INTEGER,
+                action_type TEXT NOT NULL,
+                actor_id INTEGER,
+                actor_name TEXT NOT NULL,
+                public_summary TEXT NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS intent_notes (
+                id SERIAL PRIMARY KEY,
+                item_id INTEGER NOT NULL,
+                estate_id INTEGER NOT NULL,
+                member_id INTEGER NOT NULL,
+                member_name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+    else:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                estate_id INTEGER,
+                item_id INTEGER,
+                action_type TEXT NOT NULL,
+                actor_id INTEGER,
+                actor_name TEXT NOT NULL,
+                public_summary TEXT NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS intent_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id INTEGER NOT NULL,
+                estate_id INTEGER NOT NULL,
+                member_id INTEGER NOT NULL,
+                member_name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+    conn.commit()
+    conn.close()
+
+
+def write_audit(
+    estate_id: int,
+    actor_name: str,
+    action_type: str,
+    public_summary: str,
+    item_id: int = None,
+    actor_id: int = None,
+    metadata: dict = None
+):
+    """
+    Write an audit log entry.
+    public_summary is always visible to all family members.
+    metadata is JSON — structured data about the action (never sensitive).
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    meta = json.dumps(metadata or {})
+    if USE_POSTGRES:
+        c.execute("""
+            INSERT INTO audit_log
+            (estate_id, item_id, action_type, actor_id, actor_name, public_summary, metadata, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (estate_id, item_id, action_type, actor_id, actor_name, public_summary, meta, now))
+    else:
+        c.execute("""
+            INSERT INTO audit_log
+            (estate_id, item_id, action_type, actor_id, actor_name, public_summary, metadata, created_at)
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (estate_id, item_id, action_type, actor_id, actor_name, public_summary, meta, now))
+    conn.commit()
+    conn.close()
+
+
+def get_audit_log(estate_id: int, item_id: int = None, limit: int = 50) -> list:
+    """
+    Get audit log entries for an estate or a specific item.
+    Always returns only public_summary — never metadata contents that are private.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    if item_id:
+        c.execute(f"""
+            SELECT actor_name, action_type, public_summary, created_at
+            FROM audit_log
+            WHERE estate_id={p} AND item_id={p}
+            ORDER BY created_at ASC
+            LIMIT {p}
+        """, (estate_id, item_id, limit))
+    else:
+        c.execute(f"""
+            SELECT actor_name, action_type, public_summary, created_at
+            FROM audit_log
+            WHERE estate_id={p}
+            ORDER BY created_at DESC
+            LIMIT {p}
+        """, (estate_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    if USE_POSTGRES:
+        cols = [d[0] for d in c.description]
+        return [dict(zip(cols, r)) for r in rows]
+    return [dict(r) for r in rows]
+
+
+def add_intent_note(
+    item_id: int,
+    estate_id: int,
+    member_id: int,
+    member_name: str,
+    content: str
+) -> int:
+    """
+    Add a private intent note. Always starts as 'private'.
+    Content is never written to the audit log.
+    The audit log only records that a note was added.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    if USE_POSTGRES:
+        c.execute("""
+            INSERT INTO intent_notes
+            (item_id, estate_id, member_id, member_name, content, visibility, created_at, updated_at)
+            VALUES (%s,%s,%s,%s,%s,'private',%s,%s) RETURNING id
+        """, (item_id, estate_id, member_id, member_name, content, now, now))
+        note_id = c.fetchone()[0]
+    else:
+        c.execute("""
+            INSERT INTO intent_notes
+            (item_id, estate_id, member_id, member_name, content, visibility, created_at, updated_at)
+            VALUES (?,?,?,?,'private',?,?)
+        """, (item_id, estate_id, member_id, member_name, content, now, now))
+        note_id = c.lastrowid
+    conn.commit()
+    conn.close()
+
+    # Audit: records existence only — never content
+    write_audit(
+        estate_id=estate_id,
+        item_id=item_id,
+        actor_id=member_id,
+        actor_name=member_name,
+        action_type='note_added',
+        public_summary=f"{member_name} added a private note."
+    )
+
+    return note_id
+
+
+def set_note_visibility(
+    note_id: int,
+    member_id: int,
+    member_name: str,
+    estate_id: int,
+    item_id: int,
+    new_visibility: str
+):
+    """
+    Change the visibility of an intent note.
+    Only the author (member_id) can change visibility.
+    new_visibility: 'private' | 'mediator' | 'morris' | 'public'
+    Visibility changes are always audited.
+    """
+    valid = {'private', 'mediator', 'morris', 'public'}
+    if new_visibility not in valid:
+        raise ValueError(f"Invalid visibility: {new_visibility}")
+
+    conn = get_connection()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    p = '%s' if USE_POSTGRES else '?'
+
+    # Verify ownership
+    c.execute(f"SELECT member_id FROM intent_notes WHERE id={p}", (note_id,))
+    row = c.fetchone()
+    if not row or row[0] != member_id:
+        conn.close()
+        raise PermissionError("Only the author can change note visibility.")
+
+    c.execute(
+        f"UPDATE intent_notes SET visibility={p}, updated_at={p} WHERE id={p}",
+        (new_visibility, now, note_id)
+    )
+    conn.commit()
+    conn.close()
+
+    # Audit the visibility change — no content revealed
+    labels = {
+        'private': 'made their note private',
+        'mediator': 'shared their note with the Mediator',
+        'morris': 'shared their note with Morris',
+        'public': 'shared their note publicly'
+    }
+    write_audit(
+        estate_id=estate_id,
+        item_id=item_id,
+        actor_id=member_id,
+        actor_name=member_name,
+        action_type='visibility_changed',
+        public_summary=f"{member_name} {labels[new_visibility]}.",
+        metadata={"note_id": note_id, "new_visibility": new_visibility}
+    )
+
+
+def get_intent_notes(
+    item_id: int,
+    member_id: int,
+    is_morris: bool = False,
+    is_mediator: bool = False
+) -> list:
+    """
+    Get intent notes for an item, filtered by what this viewer is allowed to see.
+    - member sees: their own notes (all visibilities) + public notes from others
+    - morris sees: own notes + public + morris-visible notes
+    - mediator sees: own notes + public + mediator-visible notes
+    Content is never returned for notes the viewer isn't authorized to see.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    c.execute(f"""
+        SELECT id, member_id, member_name, content, visibility, created_at
+        FROM intent_notes
+        WHERE item_id={p}
+        ORDER BY created_at ASC
+    """, (item_id,))
+    rows = c.fetchall()
+    conn.close()
+
+    if USE_POSTGRES:
+        cols = [d[0] for d in c.description]
+        notes = [dict(zip(cols, r)) for r in rows]
+    else:
+        notes = [dict(r) for r in rows]
+
+    result = []
+    for note in notes:
+        is_author = note['member_id'] == member_id
+        vis = note['visibility']
+
+        can_read = (
+            is_author or
+            vis == 'public' or
+            (is_morris and vis == 'morris') or
+            (is_mediator and vis == 'mediator')
+        )
+
+        if can_read:
+            result.append(note)
+        # If not authorized, don't include — not even a redacted version
+        # The audit log already surfaces that a note exists
+
+    return result
