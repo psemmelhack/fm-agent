@@ -261,3 +261,155 @@ def read_memories(limit: int = 10, types: list = None) -> list:
     if USE_POSTGRES:
         return fetchall_as_dict(c, rows)
     return [dict(r) for r in rows]
+
+
+# ── Family Members ────────────────────────────────────────────────────────────
+
+def init_family_tables(conn=None):
+    """Add family member and estate tables. Call after init_db()."""
+    close = conn is None
+    if conn is None:
+        conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+
+    if USE_POSTGRES:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS estates (
+                id SERIAL PRIMARY KEY,
+                deceased_name TEXT NOT NULL,
+                executor_name TEXT NOT NULL,
+                executor_email TEXT NOT NULL,
+                status TEXT DEFAULT 'active',
+                created_at TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS family_members (
+                id SERIAL PRIMARY KEY,
+                estate_id INTEGER REFERENCES estates(id),
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                role TEXT DEFAULT 'member',
+                join_code TEXT UNIQUE,
+                status TEXT DEFAULT 'invited',
+                invited_at TEXT,
+                joined_at TEXT,
+                last_nudge_at TEXT
+            )
+        """)
+    else:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS estates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                deceased_name TEXT NOT NULL,
+                executor_name TEXT NOT NULL,
+                executor_email TEXT NOT NULL,
+                status TEXT DEFAULT 'active',
+                created_at TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS family_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                estate_id INTEGER REFERENCES estates(id),
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                role TEXT DEFAULT 'member',
+                join_code TEXT UNIQUE,
+                status TEXT DEFAULT 'invited',
+                invited_at TEXT,
+                joined_at TEXT,
+                last_nudge_at TEXT
+            )
+        """)
+
+    conn.commit()
+    if close:
+        conn.close()
+
+
+def create_estate(deceased_name: str, executor_name: str, executor_email: str) -> int:
+    conn = get_connection()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    if USE_POSTGRES:
+        c.execute(
+            "INSERT INTO estates (deceased_name, executor_name, executor_email, created_at) VALUES (%s,%s,%s,%s) RETURNING id",
+            (deceased_name, executor_name, executor_email, now)
+        )
+        estate_id = c.fetchone()[0]
+    else:
+        c.execute(
+            "INSERT INTO estates (deceased_name, executor_name, executor_email, created_at) VALUES (?,?,?,?)",
+            (deceased_name, executor_name, executor_email, now)
+        )
+        estate_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return estate_id
+
+
+def add_family_member(estate_id: int, name: str, email: str, role: str = "member") -> str:
+    """Add a family member and generate their unique join code."""
+    import random
+    import string
+    join_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    now = datetime.now().isoformat()
+    conn = get_connection()
+    c = conn.cursor()
+    if USE_POSTGRES:
+        c.execute(
+            "INSERT INTO family_members (estate_id, name, email, role, join_code, invited_at) VALUES (%s,%s,%s,%s,%s,%s)",
+            (estate_id, name, email, role, join_code, now)
+        )
+    else:
+        c.execute(
+            "INSERT INTO family_members (estate_id, name, email, role, join_code, invited_at) VALUES (?,?,?,?,?,?)",
+            (estate_id, name, email, role, join_code, now)
+        )
+    conn.commit()
+    conn.close()
+    return join_code
+
+
+def get_pending_members(estate_id: int) -> list:
+    """Get family members who haven't joined yet."""
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    c.execute(f"SELECT * FROM family_members WHERE estate_id={p} AND status='invited'", (estate_id,))
+    rows = c.fetchall()
+    conn.close()
+    if USE_POSTGRES:
+        cols = [desc[0] for desc in c.description]
+        return [dict(zip(cols, r)) for r in rows]
+    return [dict(r) for r in rows]
+
+
+def get_all_members(estate_id: int) -> list:
+    """Get all family members for an estate."""
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    c.execute(f"SELECT * FROM family_members WHERE estate_id={p}", (estate_id,))
+    rows = c.fetchall()
+    conn.close()
+    if USE_POSTGRES:
+        cols = [desc[0] for desc in c.description]
+        return [dict(zip(cols, r)) for r in rows]
+    return [dict(r) for r in rows]
+
+
+def mark_member_joined(join_code: str):
+    """Mark a family member as having joined."""
+    conn = get_connection()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    p = '%s' if USE_POSTGRES else '?'
+    c.execute(
+        f"UPDATE family_members SET status='joined', joined_at={p} WHERE join_code={p}",
+        (now, join_code)
+    )
+    conn.commit()
+    conn.close()
