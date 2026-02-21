@@ -63,15 +63,20 @@ def send_invitation_email(
         </p>
 
         <p style="font-size: 16px; line-height: 1.7;">
-            Family Matter is a quiet, organized way to handle something that can 
+            Family Matter is a calm, organized way to handle something that can 
             feel overwhelming. I'll guide everyone through it — what needs to happen, 
             when, and how to make sure things are handled fairly and with care.
         </p>
 
-        <p style="font-size: 16px; line-height: 1.7;">
-            There's no rush right now. When you're ready, use your personal 
-            join code below to get started. It will take just a few minutes.
-        </p>
+<p style="font-size: 16px; line-height: 1.7;">
+    There's no rush right now. When you're ready, visit 
+    <a href="https://app.familymatter.co" 
+       style="color: #8b7355; text-decoration: none; border-bottom: 1px solid #C4A882;">
+        app.familymatter.co
+    </a> 
+    and enter your personal join code below to get started. 
+    It will take just a few minutes.
+</p>    
 
         <div style="background: #f5f5f0; border-left: 3px solid #8b7355; 
                     padding: 20px 25px; margin: 30px 0; border-radius: 4px;">
