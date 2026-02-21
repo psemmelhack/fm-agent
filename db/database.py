@@ -413,3 +413,244 @@ def mark_member_joined(join_code: str):
     )
     conn.commit()
     conn.close()
+
+
+# ── Tabulator Tables ──────────────────────────────────────────────────────────
+
+def init_tabulator_tables():
+    """Add inventory and claims tables."""
+    conn = get_connection()
+    c = conn.cursor()
+
+    if USE_POSTGRES:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_items (
+                id SERIAL PRIMARY KEY,
+                estate_id INTEGER REFERENCES estates(id),
+                name TEXT NOT NULL,
+                description TEXT,
+                location TEXT,
+                category TEXT,
+                estimated_value NUMERIC DEFAULT 0,
+                appraised_value NUMERIC,
+                status TEXT DEFAULT 'unclaimed',
+                photo_url TEXT,
+                notes TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS claims (
+                id SERIAL PRIMARY KEY,
+                item_id INTEGER REFERENCES inventory_items(id),
+                estate_id INTEGER REFERENCES estates(id),
+                member_id INTEGER REFERENCES family_members(id),
+                member_name TEXT,
+                claim_type TEXT DEFAULT 'want',
+                priority INTEGER DEFAULT 1,
+                note TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT,
+                resolved_at TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS distributions (
+                id SERIAL PRIMARY KEY,
+                item_id INTEGER REFERENCES inventory_items(id),
+                estate_id INTEGER REFERENCES estates(id),
+                member_id INTEGER REFERENCES family_members(id),
+                member_name TEXT,
+                estimated_value NUMERIC DEFAULT 0,
+                distribution_method TEXT,
+                distributed_at TEXT
+            )
+        """)
+    else:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                estate_id INTEGER,
+                name TEXT NOT NULL,
+                description TEXT,
+                location TEXT,
+                category TEXT,
+                estimated_value NUMERIC DEFAULT 0,
+                appraised_value NUMERIC,
+                status TEXT DEFAULT 'unclaimed',
+                photo_url TEXT,
+                notes TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id INTEGER,
+                estate_id INTEGER,
+                member_id INTEGER,
+                member_name TEXT,
+                claim_type TEXT DEFAULT 'want',
+                priority INTEGER DEFAULT 1,
+                note TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT,
+                resolved_at TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS distributions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id INTEGER,
+                estate_id INTEGER,
+                member_id INTEGER,
+                member_name TEXT,
+                estimated_value NUMERIC DEFAULT 0,
+                distribution_method TEXT,
+                distributed_at TEXT
+            )
+        """)
+
+    conn.commit()
+    conn.close()
+
+
+def add_item(estate_id: int, name: str, description: str = None,
+             location: str = None, category: str = None,
+             estimated_value: float = 0) -> int:
+    conn = get_connection()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    if USE_POSTGRES:
+        c.execute("""
+            INSERT INTO inventory_items
+            (estate_id, name, description, location, category, estimated_value, created_at, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+        """, (estate_id, name, description, location, category, estimated_value, now, now))
+        item_id = c.fetchone()[0]
+    else:
+        c.execute("""
+            INSERT INTO inventory_items
+            (estate_id, name, description, location, category, estimated_value, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (estate_id, name, description, location, category, estimated_value, now, now))
+        item_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return item_id
+
+
+def add_claim(item_id: int, estate_id: int, member_id: int,
+              member_name: str, claim_type: str = "want",
+              priority: int = 1, note: str = None) -> int:
+    conn = get_connection()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    if USE_POSTGRES:
+        c.execute("""
+            INSERT INTO claims
+            (item_id, estate_id, member_id, member_name, claim_type, priority, note, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+        """, (item_id, estate_id, member_id, member_name, claim_type, priority, note, now))
+        claim_id = c.fetchone()[0]
+    else:
+        c.execute("""
+            INSERT INTO claims
+            (item_id, estate_id, member_id, member_name, claim_type, priority, note, created_at)
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (item_id, estate_id, member_id, member_name, claim_type, priority, note, now))
+        claim_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return claim_id
+
+
+def get_item_claims(item_id: int) -> list:
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    c.execute(f"SELECT * FROM claims WHERE item_id={p} AND status='pending'", (item_id,))
+    rows = c.fetchall()
+    conn.close()
+    if USE_POSTGRES:
+        cols = [desc[0] for desc in c.description]
+        return [dict(zip(cols, r)) for r in rows]
+    return [dict(r) for r in rows]
+
+
+def get_estate_inventory(estate_id: int, status: str = None) -> list:
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    if status:
+        c.execute(f"SELECT * FROM inventory_items WHERE estate_id={p} AND status={p}", (estate_id, status))
+    else:
+        c.execute(f"SELECT * FROM inventory_items WHERE estate_id={p}", (estate_id,))
+    rows = c.fetchall()
+    conn.close()
+    if USE_POSTGRES:
+        cols = [desc[0] for desc in c.description]
+        return [dict(zip(cols, r)) for r in rows]
+    return [dict(r) for r in rows]
+
+
+def resolve_claim(item_id: int, winner_member_id: int,
+                  winner_name: str, method: str, value: float = 0):
+    """Mark an item as distributed to a specific family member."""
+    conn = get_connection()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    p = '%s' if USE_POSTGRES else '?'
+
+    # Update item status
+    c.execute(f"UPDATE inventory_items SET status='distributed', updated_at={p} WHERE id={p}", (now, item_id))
+
+    # Mark all claims resolved
+    c.execute(f"UPDATE claims SET status='resolved', resolved_at={p} WHERE item_id={p}", (now, item_id))
+
+    # Get estate_id
+    c.execute(f"SELECT estate_id FROM inventory_items WHERE id={p}", (item_id,))
+    row = c.fetchone()
+    estate_id = row[0] if row else None
+
+    # Record distribution
+    if estate_id:
+        if USE_POSTGRES:
+            c.execute("""
+                INSERT INTO distributions
+                (item_id, estate_id, member_id, member_name, estimated_value, distribution_method, distributed_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """, (item_id, estate_id, winner_member_id, winner_name, value, method, now))
+        else:
+            c.execute("""
+                INSERT INTO distributions
+                (item_id, estate_id, member_id, member_name, estimated_value, distribution_method, distributed_at)
+                VALUES (?,?,?,?,?,?,?)
+            """, (item_id, estate_id, winner_member_id, winner_name, value, method, now))
+
+    conn.commit()
+    conn.close()
+
+
+def get_fairness_summary(estate_id: int) -> list:
+    """Return total estimated value distributed per family member."""
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    c.execute(f"""
+        SELECT member_name,
+               COUNT(*) as item_count,
+               COALESCE(SUM(estimated_value), 0) as total_value
+        FROM distributions
+        WHERE estate_id={p}
+        GROUP BY member_name
+        ORDER BY total_value DESC
+    """, (estate_id,))
+    rows = c.fetchall()
+    conn.close()
+    if USE_POSTGRES:
+        cols = [desc[0] for desc in c.description]
+        return [dict(zip(cols, r)) for r in rows]
+    return [dict(r) for r in rows]
