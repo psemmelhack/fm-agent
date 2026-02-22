@@ -1,7 +1,7 @@
 """
 main.py
-Entry point for cloud deployment.
-Runs both the scheduler and Telegram listener in parallel threads.
+Entry point for Railway deployment.
+Runs the FM scheduler — morning briefings, steward sweep, suggestion checks.
 """
 
 import threading
@@ -14,11 +14,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
 load_dotenv()
 
-from db.database import init_db
-from scheduler import morning_job, reminder_check_job
-from tools.telegram import get_latest_message, clear_updates, send_message
-from agents.crew import run_event_search, run_event_confirmation
-from db.database import get_state
+from scheduler import (
+    init_all,
+    morning_job,
+    suggestion_check_job,
+    steward_sweep_job,
+    onboarding_check_job,
+)
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -26,98 +28,71 @@ from apscheduler.triggers.cron import CronTrigger
 
 PT = pytz.timezone("America/Los_Angeles")
 
-# ── Telegram polling state ────────────────────────────────────────────────────
+ESTATE_ID     = int(os.getenv("FM_ESTATE_ID", "1"))
+ESTATE_NAME   = os.getenv("FM_ESTATE_NAME", "the estate")
+EXECUTOR_NAME = os.getenv("FM_EXECUTOR_NAME", "the executor")
 
-last_update_id = None
-
-
-def handle_message(text: str):
-    state_row = get_state()
-    current_state = state_row.get("state", "idle")
-    print(f"Incoming: '{text}' | State: {current_state}")
-
-    if current_state == "waiting_for_preference":
-        run_event_search(text)
-    elif current_state == "waiting_for_selection":
-        previous_results = state_row.get("search_results", "")
-        run_event_confirmation(text, previous_results)
-    else:
-        send_message(
-            "Got it! I'll check in again tomorrow morning at 6AM PT. "
-            "Have a great rest of your day!"
-        )
-
-
-def poll():
-    global last_update_id
-    update = get_latest_message()
-    if not update:
-        return
-    update_id = update.get("update_id")
-    text = update.get("text", "").strip()
-    if update_id == last_update_id:
-        return
-    if text.startswith("/"):
-        clear_updates(update_id)
-        last_update_id = update_id
-        return
-    if text:
-        handle_message(text)
-    clear_updates(update_id)
-    last_update_id = update_id
-
-
-def run_telegram_listener():
-    print("✅ Telegram listener started.")
-    while True:
-        try:
-            poll()
-        except Exception as e:
-            print(f"Poll error: {e}")
-        time.sleep(2)
-
-
-# ── Scheduler ─────────────────────────────────────────────────────────────────
 
 def run_scheduler():
     scheduler = BackgroundScheduler(timezone=PT)
 
+    # 9:00 AM PT — Morris morning estate briefing
     scheduler.add_job(
         morning_job,
-        trigger=CronTrigger(hour=6, minute=0, timezone=PT),
-        id="morning_greeting",
+        trigger=CronTrigger(hour=9, minute=0, timezone=PT),
+        id="morning_briefing",
+        name="Morning Estate Briefing",
         replace_existing=True
     )
 
+    # 9:30 AM PT — Steward daily sweep
     scheduler.add_job(
-        reminder_check_job,
+        steward_sweep_job,
+        trigger=CronTrigger(hour=9, minute=30, timezone=PT),
+        id="steward_sweep",
+        name="Steward Daily Sweep",
+        replace_existing=True
+    )
+
+    # Every 10 minutes — new suggestion check
+    scheduler.add_job(
+        suggestion_check_job,
         trigger="interval",
-        minutes=5,
-        id="reminder_check",
+        minutes=10,
+        id="suggestion_check",
+        name="New Suggestion Check",
         replace_existing=True
     )
 
     scheduler.start()
-    print("✅ Scheduler started. Morning greeting at 6AM PT.")
+    print("✅ FM Scheduler started.")
+    print(f"   Estate: {ESTATE_NAME} (ID: {ESTATE_ID})")
+    print(f"   Executor: {EXECUTOR_NAME}")
+    print("   Morning briefing: 9:00 AM PT")
+    print("   Steward sweep:    9:30 AM PT")
+    print("   Suggestion check: every 10 min")
 
     while True:
         time.sleep(60)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    init_db()
     print("🚀 FM Agent starting...")
 
-    # Run scheduler and Telegram listener in parallel threads
+    # Init all database tables
+    init_all()
+
+    # Check if onboarding needed (runs once on startup)
+    try:
+        onboarding_check_job()
+    except Exception as e:
+        print(f"Onboarding check skipped: {e}")
+
+    # Run scheduler in a daemon thread
     scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-    telegram_thread = threading.Thread(target=run_telegram_listener, daemon=True)
-
     scheduler_thread.start()
-    telegram_thread.start()
 
-    print("FM Agent running. Press Ctrl+C to stop.\n")
+    print("FM Agent running.\n")
 
     try:
         while True:
