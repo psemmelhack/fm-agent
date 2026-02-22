@@ -1159,3 +1159,329 @@ def reject_suggestion(
         public_summary=f"{reviewed_by} did not add '{name}' to the inventory.",
         metadata={"suggestion_id": suggestion_id, "suggested_by": suggested_by_name}
     )
+
+
+# ── Estate Schedule & Steward ─────────────────────────────────────────────────
+
+MILESTONE_KEYS = [
+    "onboarding_complete",       # executor has configured schedule
+    "inventory_complete",        # all items added to ledger
+    "family_joined",             # all invited members have joined
+    "claims_open",               # claims period begins
+    "claims_closed",             # claims period ends
+    "conflicts_resolved",        # all conflicts have a decision
+    "distribution_complete",     # all items distributed
+]
+
+DEFAULT_DURATIONS_DAYS = {
+    "inventory_complete":    30,
+    "family_joined":         14,
+    "claims_open":           30,   # after inventory_complete
+    "claims_closed":         30,   # duration of claims period
+    "conflicts_resolved":    14,   # after claims_closed
+    "distribution_complete": 60,   # after conflicts_resolved
+}
+
+
+def init_schedule_tables():
+    """Create estate_schedule, milestones, and timeline_alerts tables."""
+    conn = get_connection()
+    c = conn.cursor()
+
+    if USE_POSTGRES:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS estate_schedule (
+                id SERIAL PRIMARY KEY,
+                estate_id INTEGER NOT NULL UNIQUE,
+                target_end_date TEXT,
+                urgency TEXT DEFAULT 'normal',
+                legal_deadlines TEXT,
+                notes TEXT,
+                onboarding_complete BOOLEAN DEFAULT FALSE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS milestones (
+                id SERIAL PRIMARY KEY,
+                estate_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                target_date TEXT,
+                completed_at TEXT,
+                status TEXT DEFAULT 'pending',
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(estate_id, key)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS timeline_alerts (
+                id SERIAL PRIMARY KEY,
+                estate_id INTEGER NOT NULL,
+                alert_type TEXT NOT NULL,
+                severity TEXT DEFAULT 'info',
+                message TEXT NOT NULL,
+                detail TEXT,
+                resolved BOOLEAN DEFAULT FALSE,
+                notified BOOLEAN DEFAULT FALSE,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            )
+        """)
+    else:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS estate_schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                estate_id INTEGER NOT NULL UNIQUE,
+                target_end_date TEXT,
+                urgency TEXT DEFAULT 'normal',
+                legal_deadlines TEXT,
+                notes TEXT,
+                onboarding_complete INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS milestones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                estate_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                target_date TEXT,
+                completed_at TEXT,
+                status TEXT DEFAULT 'pending',
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(estate_id, key)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS timeline_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                estate_id INTEGER NOT NULL,
+                alert_type TEXT NOT NULL,
+                severity TEXT DEFAULT 'info',
+                message TEXT NOT NULL,
+                detail TEXT,
+                resolved INTEGER DEFAULT 0,
+                notified INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            )
+        """)
+
+    conn.commit()
+    conn.close()
+
+
+def get_schedule(estate_id: int) -> dict:
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    c.execute(f"SELECT * FROM estate_schedule WHERE estate_id={p}", (estate_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {}
+    cols = [d[0] for d in c.description]
+    return dict(zip(cols, row))
+
+
+def save_schedule(
+    estate_id: int,
+    target_end_date: str = None,
+    urgency: str = 'normal',
+    legal_deadlines: str = None,
+    notes: str = None,
+    onboarding_complete: bool = False
+):
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    now = datetime.now().isoformat()
+
+    existing = get_schedule(estate_id)
+    if existing:
+        c.execute(f"""
+            UPDATE estate_schedule
+            SET target_end_date={p}, urgency={p}, legal_deadlines={p},
+                notes={p}, onboarding_complete={p}, updated_at={p}
+            WHERE estate_id={p}
+        """, (target_end_date, urgency, legal_deadlines, notes,
+              onboarding_complete, now, estate_id))
+    else:
+        c.execute(f"""
+            INSERT INTO estate_schedule
+            (estate_id, target_end_date, urgency, legal_deadlines,
+             notes, onboarding_complete, created_at, updated_at)
+            VALUES ({p},{p},{p},{p},{p},{p},{p},{p})
+        """, (estate_id, target_end_date, urgency, legal_deadlines,
+              notes, onboarding_complete, now, now))
+
+    conn.commit()
+    conn.close()
+
+
+def set_milestones(estate_id: int, milestones: list):
+    """
+    Upsert a list of milestone dicts:
+    [{ key, label, target_date, status, notes }]
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    now = datetime.now().isoformat()
+
+    for m in milestones:
+        if USE_POSTGRES:
+            c.execute("""
+                INSERT INTO milestones
+                    (estate_id, key, label, target_date, status, notes, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (estate_id, key) DO UPDATE SET
+                    label=EXCLUDED.label,
+                    target_date=EXCLUDED.target_date,
+                    status=EXCLUDED.status,
+                    notes=EXCLUDED.notes
+            """, (estate_id, m['key'], m['label'],
+                  m.get('target_date'), m.get('status', 'pending'),
+                  m.get('notes'), now))
+        else:
+            c.execute("""
+                INSERT OR REPLACE INTO milestones
+                    (estate_id, key, label, target_date, status, notes, created_at)
+                VALUES (?,?,?,?,?,?,?)
+            """, (estate_id, m['key'], m['label'],
+                  m.get('target_date'), m.get('status', 'pending'),
+                  m.get('notes'), now))
+
+    conn.commit()
+    conn.close()
+
+
+def get_milestones(estate_id: int) -> list:
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    c.execute(f"""
+        SELECT * FROM milestones WHERE estate_id={p}
+        ORDER BY target_date ASC NULLS LAST
+    """ if USE_POSTGRES else f"""
+        SELECT * FROM milestones WHERE estate_id={p}
+        ORDER BY CASE WHEN target_date IS NULL THEN 1 ELSE 0 END, target_date ASC
+    """, (estate_id,))
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return []
+    cols = [d[0] for d in c.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def complete_milestone(estate_id: int, key: str, notes: str = None):
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    now = datetime.now().isoformat()
+    c.execute(f"""
+        UPDATE milestones
+        SET status='complete', completed_at={p}, notes=COALESCE({p}, notes)
+        WHERE estate_id={p} AND key={p}
+    """, (now, notes, estate_id, key))
+    conn.commit()
+    conn.close()
+
+
+def write_alert(
+    estate_id: int,
+    alert_type: str,
+    message: str,
+    severity: str = 'info',
+    detail: str = None
+):
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    now = datetime.now().isoformat()
+    c.execute(f"""
+        INSERT INTO timeline_alerts
+        (estate_id, alert_type, severity, message, detail, created_at)
+        VALUES ({p},{p},{p},{p},{p},{p})
+    """, (estate_id, alert_type, severity, message, detail, now))
+    conn.commit()
+    conn.close()
+
+
+def get_active_alerts(estate_id: int) -> list:
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    c.execute(f"""
+        SELECT * FROM timeline_alerts
+        WHERE estate_id={p} AND resolved=FALSE
+        ORDER BY
+            CASE severity
+                WHEN 'critical' THEN 1
+                WHEN 'warning'  THEN 2
+                WHEN 'info'     THEN 3
+                ELSE 4
+            END,
+            created_at DESC
+    """ if USE_POSTGRES else f"""
+        SELECT * FROM timeline_alerts
+        WHERE estate_id={p} AND resolved=0
+        ORDER BY
+            CASE severity
+                WHEN 'critical' THEN 1
+                WHEN 'warning'  THEN 2
+                WHEN 'info'     THEN 3
+                ELSE 4
+            END,
+            created_at DESC
+    """, (estate_id,))
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return []
+    cols = [d[0] for d in c.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def resolve_alert(alert_id: int):
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    now = datetime.now().isoformat()
+    c.execute(f"""
+        UPDATE timeline_alerts
+        SET resolved=TRUE, resolved_at={p}
+        WHERE id={p}
+    """ if USE_POSTGRES else f"""
+        UPDATE timeline_alerts
+        SET resolved=1, resolved_at={p}
+        WHERE id={p}
+    """, (now, alert_id))
+    conn.commit()
+    conn.close()
+
+
+def resolve_alert_type(estate_id: int, alert_type: str):
+    """Resolve all active alerts of a given type for an estate."""
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    now = datetime.now().isoformat()
+    c.execute(f"""
+        UPDATE timeline_alerts
+        SET resolved=TRUE, resolved_at={p}
+        WHERE estate_id={p} AND alert_type={p} AND resolved=FALSE
+    """ if USE_POSTGRES else f"""
+        UPDATE timeline_alerts
+        SET resolved=1, resolved_at={p}
+        WHERE estate_id={p} AND alert_type={p} AND resolved=0
+    """, (now, estate_id, alert_type))
+    conn.commit()
+    conn.close()

@@ -1,68 +1,82 @@
 """
 webhook.py
-Polls Telegram for incoming messages and routes them
-based on conversation state.
+Polls Telegram for incoming messages from the executor.
+Routes everything to Morris, who answers from full estate context.
 
-Run with: python webhook.py
-
-No ngrok needed — this polls Telegram's servers directly.
-Telegram long-polling means no inbound HTTP server required.
+No complex state machine needed — Morris is always in conversation mode.
 """
 
-import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 import time
 from dotenv import load_dotenv
-from db.database import init_db, get_state
+
+from db.database import init_db
 from tools.telegram import get_latest_message, clear_updates, send_message
-from agents.crew import run_event_search, run_event_confirmation
+from agents.crew import run_executor_reply
+from agents.onboarding import handle_onboarding_reply
+from db.database import get_schedule
 
 load_dotenv()
 
-# Track the last update_id we've processed so we don't re-handle messages
+ESTATE_ID     = int(os.getenv("FM_ESTATE_ID", "1"))
+ESTATE_NAME   = os.getenv("FM_ESTATE_NAME", "the estate")
+EXECUTOR_NAME = os.getenv("FM_EXECUTOR_NAME", "the executor")
+
 last_update_id = None
 
 
 def handle_message(text: str):
-    """Route incoming message based on current conversation state."""
+    """Route executor message — onboarding if in progress, otherwise Morris Q&A."""
+    from db.database import get_state
     state_row = get_state()
     current_state = state_row.get("state", "idle")
 
-    print(f"Incoming: '{text}' | State: {current_state}")
+    print(f"Executor → Morris: '{text}' | State: {current_state}")
 
-    if current_state == "waiting_for_preference":
-        run_event_search(text)
+    # Route onboarding replies
+    if current_state in ("onboarding_q1", "onboarding_q2",
+                         "onboarding_q3", "onboarding_q4"):
+        try:
+            handle_onboarding_reply(
+                user_message=text,
+                estate_id=ESTATE_ID,
+                estate_name=ESTATE_NAME,
+                executor_name=EXECUTOR_NAME
+            )
+        except Exception as e:
+            print(f"Onboarding reply error: {e}")
+            send_message("Something went wrong — let me try that again. — Morris")
+        return
 
-    elif current_state == "waiting_for_selection":
-        previous_results = state_row.get("search_results", "")
-        run_event_confirmation(text, previous_results)
-
-    else:
+    # Normal Morris conversation
+    try:
+        run_executor_reply(
+            user_message=text,
+            estate_id=ESTATE_ID,
+            estate_name=ESTATE_NAME,
+            executor_name=EXECUTOR_NAME
+        )
+    except Exception as e:
+        print(f"Reply error: {e}")
         send_message(
-            "Got it! I'll check in again tomorrow morning at 6AM PT. "
-            "Have a great rest of your day!"
+            "Something went wrong on my end. Give me a moment and try again. — Morris"
         )
 
 
 def poll():
-    """Long-poll Telegram for new messages."""
     global last_update_id
 
     update = get_latest_message()
-
     if not update:
         return
 
     update_id = update.get("update_id")
     text = update.get("text", "").strip()
 
-    # Skip if we've already handled this update
     if update_id == last_update_id:
         return
 
-    # Skip bot commands like /start
+    # Skip bot commands
     if text.startswith("/"):
         clear_updates(update_id)
         last_update_id = update_id
@@ -77,8 +91,10 @@ def poll():
 
 if __name__ == "__main__":
     init_db()
-    print("✅ Telegram listener running.")
-    print("   Polling for your replies every 2 seconds.")
+    print("✅ FM Telegram listener running.")
+    print(f"   Estate: {ESTATE_NAME} (ID: {ESTATE_ID})")
+    print(f"   Executor: {EXECUTOR_NAME}")
+    print("   All executor messages routed to Morris.")
     print("   Press Ctrl+C to stop.\n")
 
     while True:
