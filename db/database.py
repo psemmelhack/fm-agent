@@ -937,3 +937,225 @@ def get_intent_notes(
         # The audit log already surfaces that a note exists
 
     return result
+
+
+# ── Item Suggestions ──────────────────────────────────────────────────────────
+
+def init_suggestions_table():
+    """Add item_suggestions table for executor review workflow."""
+    conn = get_connection()
+    c = conn.cursor()
+
+    if USE_POSTGRES:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS item_suggestions (
+                id SERIAL PRIMARY KEY,
+                estate_id INTEGER NOT NULL,
+                suggested_by_id INTEGER NOT NULL,
+                suggested_by_name TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                location TEXT,
+                category TEXT,
+                estimated_value NUMERIC DEFAULT 0,
+                photo_url TEXT,
+                suggester_note TEXT,
+                status TEXT DEFAULT 'pending',
+                reviewed_by TEXT,
+                reviewer_note TEXT,
+                created_at TEXT NOT NULL,
+                reviewed_at TEXT
+            )
+        """)
+    else:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS item_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                estate_id INTEGER NOT NULL,
+                suggested_by_id INTEGER NOT NULL,
+                suggested_by_name TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                location TEXT,
+                category TEXT,
+                estimated_value NUMERIC DEFAULT 0,
+                photo_url TEXT,
+                suggester_note TEXT,
+                status TEXT DEFAULT 'pending',
+                reviewed_by TEXT,
+                reviewer_note TEXT,
+                created_at TEXT NOT NULL,
+                reviewed_at TEXT
+            )
+        """)
+
+    conn.commit()
+    conn.close()
+
+
+def add_suggestion(
+    estate_id: int,
+    suggested_by_id: int,
+    suggested_by_name: str,
+    name: str,
+    description: str = None,
+    location: str = None,
+    category: str = None,
+    estimated_value: float = 0,
+    photo_url: str = None,
+    suggester_note: str = None
+) -> int:
+    """Add an item suggestion for executor review."""
+    conn = get_connection()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    if USE_POSTGRES:
+        c.execute("""
+            INSERT INTO item_suggestions
+            (estate_id, suggested_by_id, suggested_by_name, name, description,
+             location, category, estimated_value, photo_url, suggester_note, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+        """, (estate_id, suggested_by_id, suggested_by_name, name, description,
+              location, category, estimated_value, photo_url, suggester_note, now))
+        suggestion_id = c.fetchone()[0]
+    else:
+        c.execute("""
+            INSERT INTO item_suggestions
+            (estate_id, suggested_by_id, suggested_by_name, name, description,
+             location, category, estimated_value, photo_url, suggester_note, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """, (estate_id, suggested_by_id, suggested_by_name, name, description,
+              location, category, estimated_value, photo_url, suggester_note, now))
+        suggestion_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return suggestion_id
+
+
+def get_pending_suggestions(estate_id: int) -> list:
+    """Get all pending suggestions for an estate."""
+    conn = get_connection()
+    c = conn.cursor()
+    p = '%s' if USE_POSTGRES else '?'
+    c.execute(f"""
+        SELECT * FROM item_suggestions
+        WHERE estate_id={p} AND status='pending'
+        ORDER BY created_at ASC
+    """, (estate_id,))
+    rows = c.fetchall()
+    conn.close()
+    if USE_POSTGRES:
+        cols = [d[0] for d in c.description]
+        return [dict(zip(cols, r)) for r in rows]
+    return [dict(r) for r in rows]
+
+
+def approve_suggestion(
+    suggestion_id: int,
+    reviewed_by: str,
+    name: str,
+    description: str,
+    location: str,
+    category: str,
+    estimated_value: float,
+    reviewer_note: str = None
+) -> int:
+    """
+    Approve a suggestion — updates the suggestion record and
+    creates the item in inventory. Returns the new item_id.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    p = '%s' if USE_POSTGRES else '?'
+
+    # Get suggestion
+    c.execute(f"SELECT * FROM item_suggestions WHERE id={p}", (suggestion_id,))
+    row = c.fetchone()
+    if USE_POSTGRES:
+        cols = [d[0] for d in c.description]
+        suggestion = dict(zip(cols, row))
+    else:
+        suggestion = dict(row)
+
+    # Mark approved
+    c.execute(f"""
+        UPDATE item_suggestions
+        SET status='approved', reviewed_by={p}, reviewer_note={p}, reviewed_at={p}
+        WHERE id={p}
+    """, (reviewed_by, reviewer_note, now, suggestion_id))
+
+    conn.commit()
+    conn.close()
+
+    # Add to inventory
+    item_id = add_item(
+        estate_id=suggestion['estate_id'],
+        name=name,
+        description=description,
+        location=location,
+        category=category,
+        estimated_value=estimated_value
+    )
+
+    # Update photo_url if present
+    if suggestion.get('photo_url'):
+        conn2 = get_connection()
+        c2 = conn2.cursor()
+        c2.execute(f"UPDATE inventory_items SET photo_url={p} WHERE id={p}",
+                   (suggestion['photo_url'], item_id))
+        conn2.commit()
+        conn2.close()
+
+    # Audit entries
+    write_audit(
+        estate_id=suggestion['estate_id'],
+        item_id=item_id,
+        actor_name=suggestion['suggested_by_name'],
+        action_type='item_suggested',
+        public_summary=f"{suggestion['suggested_by_name']} suggested "{name}" for the inventory.",
+        metadata={"suggestion_id": suggestion_id}
+    )
+    write_audit(
+        estate_id=suggestion['estate_id'],
+        item_id=item_id,
+        actor_name=reviewed_by,
+        action_type='item_approved',
+        public_summary=f"{reviewed_by} approved "{name}" — added to the inventory.",
+        metadata={"suggestion_id": suggestion_id, "reviewer_note": reviewer_note}
+    )
+
+    return item_id
+
+
+def reject_suggestion(
+    suggestion_id: int,
+    reviewed_by: str,
+    reviewer_note: str = None
+):
+    """Reject a suggestion with an optional note."""
+    conn = get_connection()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    p = '%s' if USE_POSTGRES else '?'
+
+    c.execute(f"SELECT estate_id, suggested_by_name, name FROM item_suggestions WHERE id={p}",
+              (suggestion_id,))
+    row = c.fetchone()
+    estate_id, suggested_by_name, name = row[0], row[1], row[2]
+
+    c.execute(f"""
+        UPDATE item_suggestions
+        SET status='rejected', reviewed_by={p}, reviewer_note={p}, reviewed_at={p}
+        WHERE id={p}
+    """, (reviewed_by, reviewer_note, now, suggestion_id))
+    conn.commit()
+    conn.close()
+
+    write_audit(
+        estate_id=estate_id,
+        actor_name=reviewed_by,
+        action_type='suggestion_rejected',
+        public_summary=f"{reviewed_by} did not add "{name}" to the inventory.",
+        metadata={"suggestion_id": suggestion_id, "suggested_by": suggested_by_name}
+    )
