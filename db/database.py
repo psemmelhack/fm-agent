@@ -1113,7 +1113,7 @@ def approve_suggestion(
         item_id=item_id,
         actor_name=suggestion['suggested_by_name'],
         action_type='item_suggested',
-        public_summary=f"{suggestion['suggested_by_name']} suggested "{name}" for the inventory.",
+        public_summary=f"{suggestion['suggested_by_name']} suggested '{name}' for the inventory.",
         metadata={"suggestion_id": suggestion_id}
     )
     write_audit(
@@ -1121,7 +1121,7 @@ def approve_suggestion(
         item_id=item_id,
         actor_name=reviewed_by,
         action_type='item_approved',
-        public_summary=f"{reviewed_by} approved "{name}" — added to the inventory.",
+        public_summary=f"{reviewed_by} approved '{name}' — added to the inventory.",
         metadata={"suggestion_id": suggestion_id, "reviewer_note": reviewer_note}
     )
 
@@ -1156,6 +1156,6 @@ def reject_suggestion(
         estate_id=estate_id,
         actor_name=reviewed_by,
         action_type='suggestion_rejected',
-        public_summary=f"{reviewed_by} did not add "{name}" to the inventory.",
+        public_summary=f"{reviewed_by} did not add '{name}' to the inventory.",
         metadata={"suggestion_id": suggestion_id, "suggested_by": suggested_by_name}
     )
